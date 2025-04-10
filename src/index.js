@@ -9,7 +9,7 @@ const { analyzeReviews } = require('./utils/reviewAnalyzer');
 
 const app = express();
 app.use(bodyParser.json());
-console.log("process.env.MONGODB_URI", process.env.MONGODB_URI);
+console.log("Holla :: process.env.MONGODB_URI", process.env.MONGODB_URI);
 // Connect to MongoDB
 mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/whatsapp-integration', {
     useNewUrlParser: true,

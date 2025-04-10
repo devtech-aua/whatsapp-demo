@@ -13,7 +13,10 @@ console.log("Holla :: MONGODB_URI", process.env.MONGODB_URI);
 // Connect to MongoDB
 mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/whatsapp-integration', {
     useNewUrlParser: true,
-    useUnifiedTopology: true
+  useUnifiedTopology: true,
+  serverSelectionTimeoutMS: 20000,
+  connectTimeoutMS: 20000,
+  keepAlive: true
 }).then(() => {
     console.log('Connected to MongoDBd');
 }).catch(err => {

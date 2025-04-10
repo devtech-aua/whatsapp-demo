@@ -19,9 +19,9 @@ async function analyzeReviews(locations, sources, prompt = "when was the last re
         };
 
         console.log('Making API call with payload:', JSON.stringify(payload, null, 2));
-
+        
         // Make API call
-        const response = await axios.post('https://reviewanalyser.obenan.com/process-query/', payload);
+        const response = await axios.post('https://reviewanalyser.obenan.com/chat/', payload);
         
         console.log('API Response:', JSON.stringify(response.data, null, 2));
 

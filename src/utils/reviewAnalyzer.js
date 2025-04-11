@@ -34,9 +34,10 @@ async function analyzeReviews(locations, sources, prompt = "when was the last re
         // Prepare request payload
         const payload = {
             prompt,
-            location_id: locationIds,
-            thirdPartyReviewSourcesId: sourceIds,
-            companyId: [COMPANY_ID]
+            location_ids: locationIds,
+            source_ids: sourceIds,
+            company_id: COMPANY_ID,
+            language: 'en'
         };
 
         const apiUrl = `${API_CONFIG.baseURL}${API_CONFIG.endpoint}`;
@@ -67,7 +68,7 @@ async function analyzeReviews(locations, sources, prompt = "when was the last re
                 console.log(`API Response (Attempt ${4 - retries}):`);
                 console.log('Status:', response.status);
                 console.log('Headers:', JSON.stringify(response.headers, null, 2));
-                console.log('Data:', JSON.stringify(response.data, null, 2));
+                console.log('Raw Response Data:', JSON.stringify(response.data, null, 2));
 
                 // Check for error status codes
                 if (response.status !== 200) {
@@ -79,32 +80,37 @@ async function analyzeReviews(locations, sources, prompt = "when was the last re
                     throw new Error('Empty response from API');
                 }
 
-                if (!response.data.response) {
-                    throw new Error('No response field in API data');
+                // Check if response indicates an error or misunderstanding
+                if (response.data.error) {
+                    throw new Error(`API Error: ${response.data.error}`);
+                }
+
+                if (!response.data.response && !response.data.answer) {
+                    throw new Error('No valid response field in API data');
                 }
 
                 let result = {
-                    text: response.data.response,
+                    text: response.data.response || response.data.answer,
                     hasGraph: false
                 };
 
-                // Only process graph data if it exists
-                if (response.data.graph_response && response.data.graph_response.data) {
-                    const graphData = response.data.graph_response;
+                // Only process graph data if it exists and is valid
+                if (response.data.graph_data || response.data.graphData) {
+                    const graphData = response.data.graph_data || response.data.graphData;
                     
                     // Check if we have valid data for the chart
-                    if (Array.isArray(graphData.data) && graphData.data.length > 0) {
-                        console.log('Processing graph data:', JSON.stringify(graphData.data, null, 2));
+                    if (graphData && Array.isArray(graphData) && graphData.length > 0) {
+                        console.log('Processing graph data:', JSON.stringify(graphData, null, 2));
                         
                         const chart = new QuickChart();
                         
                         chart.setConfig({
                             type: 'bar',
                             data: {
-                                labels: graphData.data.map(item => item.Date),
+                                labels: graphData.map(item => item.date || item.Date),
                                 datasets: [{
-                                    label: 'Number of Posts',
-                                    data: graphData.data.map(item => item["Number of Posts"]),
+                                    label: 'Rating',
+                                    data: graphData.map(item => item.rating || item.Rating || item.value || item.Value),
                                     backgroundColor: 'rgba(82, 130, 255, 0.8)',
                                     borderColor: 'rgb(82, 130, 255)',
                                     borderWidth: 1
@@ -114,6 +120,7 @@ async function analyzeReviews(locations, sources, prompt = "when was the last re
                                 scales: {
                                     y: {
                                         beginAtZero: true,
+                                        max: 5,
                                         ticks: {
                                             stepSize: 1
                                         }
@@ -122,7 +129,7 @@ async function analyzeReviews(locations, sources, prompt = "when was the last re
                                 plugins: {
                                     title: {
                                         display: true,
-                                        text: 'Posts by Date'
+                                        text: 'Average Rating Over Time'
                                     }
                                 }
                             }
@@ -162,13 +169,11 @@ async function analyzeReviews(locations, sources, prompt = "when was the last re
                 retries--;
                 if (retries > 0) {
                     console.log(`Retrying in 2 seconds... (${retries} attempts remaining)`);
-                    // Wait 2 seconds before retrying
                     await new Promise(resolve => setTimeout(resolve, 2000));
                 }
             }
         }
 
-        // If we get here, all retries failed
         throw lastError;
     } catch (error) {
         console.error('Error in analyzeReviews:', {
@@ -184,24 +189,7 @@ async function analyzeReviews(locations, sources, prompt = "when was the last re
             } : undefined
         });
 
-        // Return more specific error messages
-        if (error.code === 'ECONNREFUSED') {
-            throw new Error('Could not connect to the review analyzer service. Please try again later.');
-        } else if (error.code === 'ETIMEDOUT' || error.message.includes('timeout')) {
-            throw new Error('The review analysis service is taking too long to respond. Please try again.');
-        } else if (error.response?.status === 404) {
-            throw new Error('The review analyzer service endpoint was not found. Please try again later.');
-        } else if (error.response?.status === 403) {
-            throw new Error('Access to the review analyzer service was denied. Please try again later.');
-        } else if (error.message.includes('No valid location')) {
-            throw new Error('Please select valid locations before analyzing reviews.');
-        } else if (error.message.includes('No valid source')) {
-            throw new Error('Please select valid review sources before analyzing reviews.');
-        } else if (error.response?.status === 400) {
-            throw new Error('Invalid request. Please check your selections and try again.');
-        } else {
-            throw new Error(`Error analyzing reviews: ${error.message}. Please try again or contact support if the issue persists.`);
-        }
+        throw error;
     }
 }
 

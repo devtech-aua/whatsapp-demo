@@ -9,7 +9,7 @@ const userStateSchema = new mongoose.Schema({
     },
     currentState: {
         type: String,
-        enum: ['awaiting_command', 'selecting_locations', 'selecting_sources', 'awaiting_review_question'],
+        enum: ['awaiting_command', 'selecting_locations', 'selecting_sources', 'awaiting_review_question', 'processing_review'],
         default: 'awaiting_command'
     },
     isActive: {

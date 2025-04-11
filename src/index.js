@@ -53,7 +53,7 @@ app.post('/webhook', async (req, res) => {
                 // Update last message
                 await userState.updateLastMessage(text, 'incoming');
                 
-                if (text === 'obemenu') {
+                if (text === 'obenan') {
                     userState.currentState = 'awaiting_command';
                     await userState.save();
                     await sendWhatsAppMessage(from, '*Welcome to Organization Assistant* 🤖\n\nHow can I help you today?\n\n*Available Commands:*\n1. *org <orgname>* - View organization options\n2. *help* - Show all commands');
@@ -131,7 +131,7 @@ app.post('/webhook', async (req, res) => {
                     if (question === 'no' || question === 'clear' || question === 'stop') {
                         userState.currentState = 'awaiting_command';
                         await userState.save();
-                        await sendWhatsAppMessage(from, "👋 Thank you for using our review analysis service. Type *obemenu* anytime to start again!");
+                        await sendWhatsAppMessage(from, "👋 Thank you for using our review analysis service. Type *obenan* anytime to start again!");
                         return;
                     }
 
@@ -157,37 +157,63 @@ app.post('/webhook', async (req, res) => {
 
                         // Call review analyzer with the user's question
                         await sendWhatsAppMessage(from, '🔄 Analyzing reviews, please wait...');
-                        const analysis = await analyzeReviews(userState.selections.locations, userState.selections.sources, question);
                         
-                        // Always send the text response
-                        await sendWhatsAppMessage(from, `*Analysis Result:*\n\n${analysis.text}`);
-                        
-                        // Only try to send chart if we have graph data
-                        if (analysis.hasGraph && analysis.chartUrl) {
-                            await sendWhatsAppMessage(from, analysis.chartUrl, 'image');
+                        try {
+                            const analysis = await analyzeReviews(userState.selections.locations, userState.selections.sources, question);
+                            
+                            // Always send the text response
+                            await sendWhatsAppMessage(from, `*Analysis Result:*\n\n${analysis.text}`);
+                            
+                            // Only try to send chart if we have graph data
+                            if (analysis.hasGraph && analysis.chartUrl) {
+                                await sendWhatsAppMessage(from, analysis.chartUrl, 'image');
+                            }
+
+                            // Ask if they want to continue
+                            await sendWhatsAppMessage(from, `\n🤔 Would you like to ask another question about the reviews?\n\n• Ask your question directly\n• Type *no* to finish\n• Type *clear* to start over`);
+                            
+                            // Keep the state as awaiting_review_question to allow more questions
+                            userState.currentState = 'awaiting_review_question';
+                            await userState.save();
+                        } catch (analysisError) {
+                            console.error('Review analysis error:', analysisError);
+                            
+                            // Handle specific error cases
+                            let errorMessage = '❌ ' + (analysisError.message || 'Sorry, there was an error analyzing the reviews.');
+                            
+                            if (analysisError.message?.includes('Could not connect') || 
+                                analysisError.message?.includes('taking too long') ||
+                                analysisError.message?.includes('endpoint was not found') ||
+                                analysisError.message?.includes('access was denied')) {
+                                // Service-level errors - reset state to awaiting_command
+                                userState.currentState = 'awaiting_command';
+                                await userState.save();
+                                await sendWhatsAppMessage(from, errorMessage + '\n\nType *org lpq* to try again.');
+                            } else if (analysisError.message?.includes('select locations')) {
+                                // Location selection needed
+                                userState.currentState = 'selecting_locations';
+                                await userState.save();
+                                await sendWhatsAppMessage(from, errorMessage);
+                                await sendLocationOptions(from);
+                            } else if (analysisError.message?.includes('select review sources')) {
+                                // Source selection needed
+                                userState.currentState = 'selecting_sources';
+                                await userState.save();
+                                await sendWhatsAppMessage(from, errorMessage);
+                                await sendSourceOptions(from);
+                            } else {
+                                // Unknown error - keep current state and allow retry
+                                await sendWhatsAppMessage(from, errorMessage + '\n\nYou can try asking your question again, or type *clear* to start over.');
+                                userState.currentState = 'awaiting_review_question';
+                                await userState.save();
+                            }
                         }
-
-                        // Ask if they want to continue
-                        await sendWhatsAppMessage(from, `\n🤔 Would you like to ask another question about the reviews?\n\n• Ask your question directly\n• Type *no* to finish\n• Type *clear* to start over`);
-                        
-                        // Keep the state as awaiting_review_question to allow more questions
-                        userState.currentState = 'awaiting_review_question';
-                        await userState.save();
-
                     } catch (error) {
-                        console.error('Error analyzing reviews:', error);
-                        let errorMessage = '❌ ' + (error.message || 'Sorry, there was an error analyzing the reviews.');
-                        
-                        if (error.message?.includes('select locations')) {
-                            errorMessage += '\n\nType *org lpq* to start selecting locations.';
-                        } else if (error.message?.includes('select review sources')) {
-                            await sendLocationOptions(from);
-                            return;
-                        }
-                        
+                        console.error('Error in review question handling:', error);
+                        let errorMessage = '❌ Sorry, something went wrong. Please try again later.';
                         await sendWhatsAppMessage(from, errorMessage);
                         
-                        // Reset state to awaiting_command if there's a serious error
+                        // Reset to awaiting_command on serious errors
                         userState.currentState = 'awaiting_command';
                         await userState.save();
                     }

@@ -1,16 +1,14 @@
-require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
-const mongoose = require('mongoose');
-const axios = require('axios');
-const { LPQ_LOCATIONS, SOURCES } = require('./utils/constants');
-const UserState = require('./models/UserState');
-const { analyzeReviews } = require('./utils/reviewAnalyzer');
 const { connectWithRetry } = require('./models/db');
+const UserState = require('./models/UserState');
+const { sendWhatsAppMessage, sendLocationOptions, sendSourceOptions } = require('./utils/whatsappHelper');
+const { analyzeReviews } = require('./utils/reviewAnalyzer');
+const { LPQ_LOCATIONS, SOURCES } = require('./utils/constants');
 
+// Initialize Express app
 const app = express();
 app.use(bodyParser.json());
-console.log("Hollatest :: MONGODB_URI", process.env.MONGODB_URI);
 
 // Connect to MongoDB with retry mechanism
 connectWithRetry().catch(err => {
@@ -18,19 +16,26 @@ connectWithRetry().catch(err => {
     process.exit(1);
 });
 
-// WhatsApp message webhook endpoint
+// Webhook endpoint
 app.post('/webhook', async (req, res) => {
     try {
         const { entry } = req.body;
-        
-        if (!entry || !entry[0]?.changes) {
-            return res.sendStatus(400);
+        if (!entry || !Array.isArray(entry) || entry.length === 0) {
+            return res.status(400).json({ error: 'Invalid request body' });
         }
 
-        const change = entry[0].changes[0];
-        const value = change.value;
+        const { changes } = entry[0];
+        if (!changes || !Array.isArray(changes) || changes.length === 0) {
+            return res.status(400).json({ error: 'Invalid request format' });
+        }
 
-        if (value.messages) {
+        const { value } = changes[0];
+        if (!value) {
+            return res.status(400).json({ error: 'No value in changes' });
+        }
+
+        // Handle messages
+        if (value.messages && Array.isArray(value.messages)) {
             const message = value.messages[0];
             const from = message.from;
             
@@ -46,7 +51,7 @@ app.post('/webhook', async (req, res) => {
                 if (!userState) {
                     userState = new UserState({ phoneNumber: from });
                 }
-                
+
                 // Handle different message types
                 if (message.type === 'text') {
                     const text = message.text.body.toLowerCase();
@@ -266,26 +271,40 @@ app.post('/webhook', async (req, res) => {
                 }
                 // Handle interactive responses
                 else if (message.type === 'interactive' && message.interactive.type === 'list_reply') {
-                    const selectedOption = message.interactive.list_reply;
-                    console.log("selectedOption.id", selectedOption.id);
-                    switch(selectedOption.id) {
-                        case 'projection':
-                            // Send 6-month projection graph
-                            const graphUrl = 'https://www.slidegeeks.com/media/catalog/product/cache/1280x720/F/i/Financial_Projection_Graph_Template_1_Ppt_PowerPoint_Presentation_Professional_Example_Introduction_Slide_1.jpg'; // Replace with actual graph URL
-                            await sendWhatsAppMessage(from, graphUrl, 'image');
-                            userState.currentState = 'awaiting_command';
-                            await userState.save();
-                            break;
-                            
-                        case 'username':
-                            await sendWhatsAppMessage(from, 'Current username: QLP\nPlease enter your new username:');
-                            userState.currentState = 'awaiting_new_username';
-                            await userState.save();
-                            break;
+                    try {
+                        const selectedOption = message.interactive.list_reply;
+                        console.log("selectedOption.id", selectedOption.id);
+                        switch(selectedOption.id) {
+                            case 'projection':
+                                // Send 6-month projection graph
+                                const graphUrl = 'https://www.slidegeeks.com/media/catalog/product/cache/1280x720/F/i/Financial_Projection_Graph_Template_1_Ppt_PowerPoint_Presentation_Professional_Example_Introduction_Slide_1.jpg'; // Replace with actual graph URL
+                                await sendWhatsAppMessage(from, graphUrl, 'image');
+                                userState.currentState = 'awaiting_command';
+                                await userState.save();
+                                break;
+                                
+                            case 'username':
+                                await sendWhatsAppMessage(from, 'Current username: QLP\nPlease enter your new username:');
+                                userState.currentState = 'awaiting_new_username';
+                                await userState.save();
+                                break;
+                        }
+                    } catch (interactiveError) {
+                        console.error('Error handling interactive response:', interactiveError);
+                        await sendWhatsAppMessage(from, '❌ Sorry, something went wrong. Please try again.');
+                        userState.currentState = 'awaiting_command';
+                        await userState.save();
                     }
                 }
-            } else if (value.statuses) {
-                // Handle status update
+            } catch (messageError) {
+                console.error('Error processing message:', messageError);
+                await sendWhatsAppMessage(from, '❌ Sorry, we\'re having technical difficulties. Please try again in a few moments.');
+                return res.status(500).json({ error: 'Message processing error' });
+            }
+        }
+        // Handle status updates
+        else if (value.statuses && Array.isArray(value.statuses)) {
+            try {
                 const status = value.statuses[0];
                 console.log('Message Status Update:', {
                     recipientId: status.recipient_id,
@@ -293,15 +312,12 @@ app.post('/webhook', async (req, res) => {
                     timestamp: new Date(parseInt(status.timestamp) * 1000).toISOString(),
                     conversationId: status.conversation?.id
                 });
+            } catch (statusError) {
+                console.error('Error processing status update:', statusError);
             }
-
-            res.sendStatus(200);
-        } catch (dbError) {
-            console.error('Database error:', dbError);
-            // Send a friendly error message to the user
-            await sendWhatsAppMessage(from, '❌ Sorry, we\'re having technical difficulties. Please try again in a few moments.');
-            return res.status(500).json({ error: 'Database error' });
         }
+
+        return res.sendStatus(200);
     } catch (error) {
         console.error('Webhook error:', error);
         return res.status(500).json({ error: 'Internal server error' });
@@ -375,60 +391,8 @@ async function sendHelpMessage(to) {
     await sendWhatsAppMessage(to, helpText);
 }
 
-// Function to send organization options
-async function sendOrgOptions(to, orgName = '') {
-    const interactiveMessage = {
-        interactive: {
-            type: "list",
-            header: {
-                type: "text",
-                text: orgName ? `${orgName.toUpperCase()} Options` : "Organization Options"
-            },
-            body: {
-                text: `Please select an option${orgName ? ` for ${orgName.toUpperCase()}` : ''}:`
-            },
-            action: {
-                button: "Select Option",
-                sections: [{
-                    title: "Available Options",
-                    rows: [
-                        {
-                            id: "projection",
-                            title: "Show Projection",
-                            description: "View your projection from last 6 months"
-                        },
-                        {
-                            id: "username",
-                            title: "Change Username",
-                            description: "Update your username"
-                        }
-                    ]
-                }]
-            }
-        }
-    };
-
-    await sendWhatsAppMessage(to, '', 'interactive', interactiveMessage);
-}
-
-// Verification endpoint for WhatsApp webhook
-app.get('/webhook', (req, res) => {
-    const mode = req.query['hub.mode'];
-    const token = req.query['hub.verify_token'];
-    const challenge = req.query['hub.challenge'];
-
-    if (mode && token) {
-        if (mode === 'subscribe' && token === process.env.VERIFY_TOKEN) {
-            console.log('Webhook verified');
-            res.status(200).send(challenge);
-        } else {
-            res.sendStatus(403);
-        }
-    }
-});
-
 // Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
+    console.log(`Server running on port ${PORT}`);
 });

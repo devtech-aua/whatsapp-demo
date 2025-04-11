@@ -6,7 +6,7 @@ const axios = require('axios');
 const { LPQ_LOCATIONS, SOURCES } = require('./utils/constants');
 const UserState = require('./models/UserState');
 const { analyzeReviews } = require('./utils/reviewAnalyzer');
-
+//ss
 const app = express();
 app.use(bodyParser.json());
 console.log("Holla :: MONGODB_URI", process.env.MONGODB_URI);

@@ -1,12 +1,13 @@
 require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
-const mongoose = require('mongoose');
-const axios = require('axios');
-const { LPQ_LOCATIONS, SOURCES } = require('./utils/constants');
+const { connectWithRetry } = require('./models/db');
 const UserState = require('./models/UserState');
+const { sendWhatsAppMessage, sendLocationOptions, sendSourceOptions, sendHelpMessage } = require('./utils/whatsappHelper');
 const { analyzeReviews } = require('./utils/reviewAnalyzer');
+const { LPQ_LOCATIONS, SOURCES } = require('./utils/constants');
 
+// Initialize Express app
 const app = express();
 app.use(bodyParser.json());
 console.log("Hollateddddddst :: MONGODB_URI", process.env.MONGODB_URI);
@@ -24,342 +25,238 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/whatsapp-
     console.error('MongoDB URI:', process.env.MONGODB_URI || 'mongodb://localhost:27017/whatsapp-integration');
 });
 
-// WhatsApp message webhook endpoint
+// Webhook endpoint
 app.post('/webhook', async (req, res) => {
     try {
         const { entry } = req.body;
-        
-        if (!entry || !entry[0]?.changes) {
-            return res.sendStatus(400);
+        if (!entry || !Array.isArray(entry) || entry.length === 0) {
+            return res.status(400).json({ error: 'Invalid request body' });
         }
 
-        const change = entry[0].changes[0];
-        const value = change.value;
+        const { changes } = entry[0];
+        if (!changes || !Array.isArray(changes) || changes.length === 0) {
+            return res.status(400).json({ error: 'Invalid request format' });
+        }
 
-        if (value.messages) {
+        const { value } = changes[0];
+        if (!value) {
+            return res.status(400).json({ error: 'No value in changes' });
+        }
+
+        // Handle messages
+        if (value.messages && Array.isArray(value.messages)) {
             const message = value.messages[0];
             const from = message.from;
             
-            // Get or create user state
-            let userState = await UserState.findOne({ phoneNumber: from });
-            if (!userState) {
-                userState = new UserState({ phoneNumber: from });
+            try {
+                // Get or create user state with timeout handling
+                let userState = await Promise.race([
+                    UserState.findOne({ phoneNumber: from }),
+                    new Promise((_, reject) => 
+                        setTimeout(() => reject(new Error('MongoDB query timeout')), 10000)
+                    )
+                ]);
+
+                if (!userState) {
+                    userState = new UserState({ phoneNumber: from });
+                }
+
+                // Handle different message types
+                if (message.type === 'text') {
+                    const text = message.text.body.toLowerCase();
+                    await handleTextMessage(text, userState, from);
+                }
+                // Handle interactive responses
+                else if (message.type === 'interactive' && message.interactive.type === 'list_reply') {
+                    await handleInteractiveMessage(message.interactive.list_reply, userState, from);
+                }
+            } catch (messageError) {
+                console.error('Error processing message:', messageError);
+                await sendWhatsAppMessage(from, '❌ Sorry, we\'re having technical difficulties. Please try again in a few moments.');
+                return res.status(500).json({ error: 'Message processing error' });
             }
-            
-            // Handle different message types
-            if (message.type === 'text') {
-                const text = message.text.body.toLowerCase();
-                
-                // Update last message
-                await userState.updateLastMessage(text, 'incoming');
-                
-                if (text === 'obemenu') {
-                    userState.currentState = 'awaiting_command';
-                    await userState.save();
-                    await sendWhatsAppMessage(from, '*Welcome to Organization Assistant* 🤖\n\nHow can I help you today?\n\n*Available Commands:*\n1. *org <orgname>* - View organization options\n2. *help* - Show all commands');
-                }
-                else if (text === 'hello' || text === 'hi') {
-                    userState.currentState = 'awaiting_command';
-                    userState.isActive = true;
-                    await userState.save();
-                    await sendWhatsAppMessage(from, '👋 Hello! How can I assist you today? Type *help* to see available commands.');
-                }
-                else if (text === 'clear') {
-                    await userState.clearSelections();
-                    userState.currentState = 'awaiting_command';
-                    await userState.save();
-                    await sendWhatsAppMessage(from, '🔄 Session cleared! You can start fresh now.');
-                }
-                else if (text === 'bye') {
-                    await userState.endSession();
-                    await sendWhatsAppMessage(from, '👋 Goodbye! Have a great day! Type *hello* or *hi* when you want to chat again.');
-                }
-                else if (text === 'help') {
-                    await sendHelpMessage(from);
-                }
-                else if (text.startsWith('org lpq')) {
-                    if (userState.currentState === 'awaiting_review_question') {
-                        // If user starts a new selection while waiting for question, clear previous state
-                        await userState.clearSelections();
-                    }
-                    userState.currentState = 'selecting_locations';
-                    await userState.save();
-                    await sendLocationOptions(from);
-                }
-                else if (userState.currentState === 'selecting_locations') {
-                    const selections = text.split(',').map(num => num.trim());
-                    const validSelections = selections.every(num => !isNaN(num) && num > 0 && num <= LPQ_LOCATIONS.length);
-                    
-                    if (validSelections) {
-                        const selectedLocations = selections.map(num => LPQ_LOCATIONS[parseInt(num) - 1]);
-                        userState.selections.locations = selectedLocations;
-                        userState.currentState = 'selecting_sources';
-                        await userState.save();
-                        await sendSourceOptions(from);
-                    } else {
-                        await sendWhatsAppMessage(from, '❌ Invalid selection. Please enter valid location numbers separated by commas (e.g., 1,3,4)');
-                        await sendLocationOptions(from);
-                    }
-                }
-                else if (userState.currentState === 'selecting_sources') {
-                    const selections = text.split(',').map(num => num.trim());
-                    const validSelections = selections.every(num => !isNaN(num) && num > 0 && num <= SOURCES.length);
-                    
-                    if (validSelections) {
-                        const selectedSources = selections.map(num => SOURCES[parseInt(num) - 1]);
-                        userState.selections.sources = selectedSources;
-                        
-                        // Print selections
-                        const userSelection = userState.selections;
-                        const summary = `*Selected Options:*\n\n*Locations:*\n${userSelection.locations.map((loc, i) => `${i + 1}. ${loc}`).join('\n')}\n\n*Sources:*\n${userSelection.sources.map((src, i) => `${i + 1}. ${src}`).join('\n')}`;
-                        await sendWhatsAppMessage(from, summary);
-
-                        userState.currentState = 'awaiting_review_question';
-                        await userState.save();
-                        await sendWhatsAppMessage(from, '❓ What would you like to know about these reviews? (e.g., "When was the last review posted?" or "What is the average rating?")');
-                    } else {
-                        await sendWhatsAppMessage(from, '❌ Invalid selection. Please enter valid source numbers separated by commas (e.g., 1,3,4)');
-                        await sendSourceOptions(from);
-                    }
-                }
-                else if (userState.currentState === 'awaiting_review_question') {
-                    const question = text.toLowerCase();
-                    
-                    // Check if user wants to stop
-                    if (question === 'no' || question === 'clear' || question === 'stop') {
-                        userState.currentState = 'awaiting_command';
-                        await userState.save();
-                        await sendWhatsAppMessage(from, "👋 Thank you for using our review analysis service. Type *obemenu* anytime to start again!");
-                        return;
-                    }
-
-                    // Check if we can process this request (5-second cooldown)
-                    if (!userState.canProcess()) {
-                        console.log('Request ignored due to cooldown');
-                        return res.sendStatus(200);
-                    }
-
-                    try {
-                        // Set state to processing and update processing time
-                        userState.currentState = 'processing_review';
-                        userState.updateProcessingTime();
-                        await userState.save();
-
-                        // Call review analyzer with the user's question
-                        await sendWhatsAppMessage(from, '🔄 Analyzing reviews, please wait...');
-                        const analysis = await analyzeReviews(userState.selections.locations, userState.selections.sources, question);
-                        
-                        // Always send the text response
-                        await sendWhatsAppMessage(from, `*Analysis Result:*\n\n${analysis.text}`);
-                        
-                        // Only try to send chart if we have graph data
-                        if (analysis.hasGraph && analysis.chartUrl) {
-                            await sendWhatsAppMessage(from, analysis.chartUrl, 'image');
-                        }
-
-                        // Ask if they want to continue
-                        await sendWhatsAppMessage(from, `\n🤔 Would you like to ask another question about the reviews?\n\n• Ask your question directly\n• Type *no* to finish\n• Type *clear* to start over`);
-                        
-                        // Keep the state as awaiting_review_question to allow more questions
-                        userState.currentState = 'awaiting_review_question';
-                        await userState.save();
-
-                    } catch (error) {
-                        console.error('Error analyzing reviews:', error);
-                        let errorMessage = '❌ Sorry, there was an error analyzing the reviews.';
-                        
-                        if (error.response?.status === 404) {
-                            errorMessage = '❌ Could not connect to the review analyzer service. Please try again later.';
-                        } else if (error.message === 'Invalid response format from API') {
-                            errorMessage = '❌ Received unexpected data format from the service.';
-                        }
-                        
-                        await sendWhatsAppMessage(from, errorMessage);
-                        // Ask if they want to try again
-                        await sendWhatsAppMessage(from, `\n🔄 Would you like to try asking another question?\n\n• Ask your question directly\n• Type *no* to finish\n• Type *clear* to start over`);
-                        
-                        // Keep the state as awaiting_review_question
-                        userState.currentState = 'awaiting_review_question';
-                        await userState.save();
-                    }
-                }
-                else if (userState.currentState === 'awaiting_command') {
-                    // Only show the help message for unrecognized commands in awaiting_command state
-                    await sendWhatsAppMessage(from, "❓ I didn't understand that command. Here are some things you can try:\n\n• Type *hello* or *hi* to start\n• Type *help* to see all commands\n• Type *org lpq* to start selecting locations\n• Type *clear* to reset your session\n• Type *bye* to end the conversation");
-                }
-                // Handle unrecognized commands based on current state
-                else if (!userState.isActive || userState.currentState === 'awaiting_command') {
-                    await sendWhatsAppMessage(from, "❓ I didn't understand that command. Here are some things you can try:\n\n• Type *hello* or *hi* to start\n• Type *help* to see all commands\n• Type *org lpq* to start selecting locations\n• Type *clear* to reset your session\n• Type *bye* to end the conversation");
-                }
-                // If in a selection state, show the appropriate options again
-                else if (userState.currentState === 'selecting_locations') {
-                    await sendWhatsAppMessage(from, '❌ Invalid selection. Please enter valid location numbers separated by commas (e.g., 1,3,4)');
-                    await sendLocationOptions(from);
-                }
-                else if (userState.currentState === 'selecting_sources') {
-                    await sendWhatsAppMessage(from, '❌ Invalid selection. Please enter valid source numbers separated by commas (e.g., 1,3,4)');
-                    await sendSourceOptions(from);
-                }
+        }
+        // Handle status updates
+        else if (value.statuses && Array.isArray(value.statuses)) {
+            try {
+                const status = value.statuses[0];
+                console.log('Message Status Update:', {
+                    recipientId: status.recipient_id,
+                    status: status.status,
+                    timestamp: new Date(parseInt(status.timestamp) * 1000).toISOString(),
+                    conversationId: status.conversation?.id
+                });
+            } catch (statusError) {
+                console.error('Error processing status update:', statusError);
             }
-            // Handle interactive responses
-            else if (message.type === 'interactive' && message.interactive.type === 'list_reply') {
-                const selectedOption = message.interactive.list_reply;
-                console.log("selectedOption.id", selectedOption.id);
-                switch(selectedOption.id) {
-                    case 'projection':
-                        // Send 6-month projection graph
-                        const graphUrl = 'https://www.slidegeeks.com/media/catalog/product/cache/1280x720/F/i/Financial_Projection_Graph_Template_1_Ppt_PowerPoint_Presentation_Professional_Example_Introduction_Slide_1.jpg'; // Replace with actual graph URL
-                        await sendWhatsAppMessage(from, graphUrl, 'image');
-                        userState.currentState = 'awaiting_command';
-                        await userState.save();
-                        break;
-                        
-                    case 'username':
-                        await sendWhatsAppMessage(from, 'Current username: QLP\nPlease enter your new username:');
-                        userState.currentState = 'awaiting_new_username';
-                        await userState.save();
-                        break;
-                }
-            }
-        } else if (value.statuses) {
-            // Handle status update
-            const status = value.statuses[0];
-            console.log('Message Status Update:', {
-                recipientId: status.recipient_id,
-                status: status.status,
-                timestamp: new Date(parseInt(status.timestamp) * 1000).toISOString(),
-                conversationId: status.conversation?.id
-            });
         }
 
-        res.sendStatus(200);
+        return res.sendStatus(200);
     } catch (error) {
         console.error('Webhook error:', error);
-        res.sendStatus(500);
+        return res.status(500).json({ error: 'Internal server error' });
     }
 });
 
-// Function to send location options
-async function sendLocationOptions(to) {
-    const message = `*Please select locations* (enter numbers separated by commas):\n\n${LPQ_LOCATIONS.map((loc, i) => `${i + 1}. ${loc}`).join('\n')}`;
-    await sendWhatsAppMessage(to, message);
-}
-
-// Function to send source options
-async function sendSourceOptions(to) {
-    const message = `*Please select sources* (enter numbers separated by commas):\n\n${SOURCES.map((src, i) => `${i + 1}. ${src}`).join('\n')}`;
-    await sendWhatsAppMessage(to, message);
-}
-
-// Function to send WhatsApp message
-async function sendWhatsAppMessage(to, message, type = 'text', additionalData = {}) {
+// Helper function to handle text messages
+async function handleTextMessage(text, userState, from) {
     try {
-        console.log('Using token:', process.env.WHATSAPP_TOKEN?.substring(0, 10) + '...');
+        // Update last message
+        await userState.updateLastMessage(text, 'incoming');
         
-        let messageData = {
-            messaging_product: 'whatsapp',
-            to: to,
-            type: type
-        };
-
-        if (type === 'text') {
-            messageData.text = { body: message };
-        } else if (type === 'interactive') {
-            messageData = { ...messageData, ...additionalData };
-        } else if (type === 'image') {
-            messageData.image = { link: message };
+        if (text === 'obenan') {
+            userState.currentState = 'awaiting_command';
+            await userState.save();
+            await sendWhatsAppMessage(from, '*Welcome to Organization Assistant* 🤖\n\nHow can I help you today?\n\n*Available Commands:*\n1. *org <orgname>* - View organization options\n2. *help* - Show all commands');
         }
-
-        const response = await axios.post(
-            `https://graph.facebook.com/v22.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
-            messageData,
-            {
-                headers: {
-                    'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}`,
-                    'Content-Type': 'application/json'
-                }
-            }
-        );
-        console.log('Message sent successfully:', response.data);
-        return response.data;
+        else if (text === 'hello' || text === 'hi') {
+            userState.currentState = 'awaiting_command';
+            userState.isActive = true;
+            await userState.save();
+            await sendWhatsAppMessage(from, '👋 Hello! How can I assist you today? Type *help* to see available commands.');
+        }
+        else if (text === 'clear') {
+            await userState.clearSelections();
+            userState.currentState = 'awaiting_command';
+            await userState.save();
+            await sendWhatsAppMessage(from, '🔄 Session cleared! You can start fresh now.');
+        }
+        else if (text === 'bye') {
+            await userState.endSession();
+            await sendWhatsAppMessage(from, '👋 Goodbye! Have a great day! Type *hello* or *hi* when you want to chat again.');
+        }
+        else if (text === 'help') {
+            await sendHelpMessage(from);
+        }
+        else if (text.startsWith('org lpq')) {
+            await handleOrgLpqCommand(userState, from);
+        }
+        else if (userState.currentState === 'selecting_locations') {
+            await handleLocationSelection(text, userState, from);
+        }
+        else if (userState.currentState === 'selecting_sources') {
+            await handleSourceSelection(text, userState, from);
+        }
+        else if (userState.currentState === 'awaiting_review_question' || userState.currentState === 'processing_review') {
+            await handleReviewQuestion(text, userState, from);
+        }
+        else if (userState.currentState === 'awaiting_command') {
+            await sendWhatsAppMessage(from, "❓ I didn't understand that command. Here are some things you can try:\n\n• Type *hello* or *hi* to start\n• Type *help* to see all commands\n• Type *org lpq* to start selecting locations\n• Type *clear* to reset your session\n• Type *bye* to end the conversation");
+        }
     } catch (error) {
-        console.error('Error sending message:', {
-            status: error.response?.status,
-            statusText: error.response?.statusText,
-            data: error.response?.data,
-            message: error.message
-        });
+        console.error('Error handling text message:', error);
         throw error;
     }
 }
 
-// Function to send help message
-async function sendHelpMessage(to) {
-    const helpText = `*Available Commands:*\n\n` +
-        `1. *org <orgname>* - View organization options\n` +
-        `2. *help* - Show this help message\n` +
-        `3. *hello* or *hi* - Start interaction\n` +
-        `4. *clear* - Reset your current session\n` +
-        `5. *bye* - End conversation\n\n` +
-        `Example: org lpq`;
-    
-    await sendWhatsAppMessage(to, helpText);
-}
-
-// Function to send organization options
-async function sendOrgOptions(to, orgName = '') {
-    const interactiveMessage = {
-        interactive: {
-            type: "list",
-            header: {
-                type: "text",
-                text: orgName ? `${orgName.toUpperCase()} Options` : "Organization Options"
-            },
-            body: {
-                text: `Please select an option${orgName ? ` for ${orgName.toUpperCase()}` : ''}:`
-            },
-            action: {
-                button: "Select Option",
-                sections: [{
-                    title: "Available Options",
-                    rows: [
-                        {
-                            id: "projection",
-                            title: "Show Projection",
-                            description: "View your projection from last 6 months"
-                        },
-                        {
-                            id: "username",
-                            title: "Change Username",
-                            description: "Update your username"
-                        }
-                    ]
-                }]
-            }
+// Helper function to handle interactive messages
+async function handleInteractiveMessage(listReply, userState, from) {
+    try {
+        console.log("selectedOption.id", listReply.id);
+        switch(listReply.id) {
+            case 'projection':
+                const graphUrl = 'https://www.slidegeeks.com/media/catalog/product/cache/1280x720/F/i/Financial_Projection_Graph_Template_1_Ppt_PowerPoint_Presentation_Professional_Example_Introduction_Slide_1.jpg';
+                await sendWhatsAppMessage(from, graphUrl, 'image');
+                userState.currentState = 'awaiting_command';
+                await userState.save();
+                break;
+                
+            case 'username':
+                await sendWhatsAppMessage(from, 'Current username: QLP\nPlease enter your new username:');
+                userState.currentState = 'awaiting_new_username';
+                await userState.save();
+                break;
         }
-    };
-
-    await sendWhatsAppMessage(to, '', 'interactive', interactiveMessage);
-}
-
-// Verification endpoint for WhatsApp webhook
-app.get('/webhook', (req, res) => {
-    const mode = req.query['hub.mode'];
-    const token = req.query['hub.verify_token'];
-    const challenge = req.query['hub.challenge'];
-
-    if (mode && token) {
-        if (mode === 'subscribe' && token === process.env.VERIFY_TOKEN) {
-            console.log('Webhook verified');
-            res.status(200).send(challenge);
-        } else {
-            res.sendStatus(403);
-        }
+    } catch (error) {
+        console.error('Error handling interactive message:', error);
+        throw error;
     }
-});
+}
+
+// Helper function to handle org lpq command
+async function handleOrgLpqCommand(userState, from) {
+    try {
+        userState.currentState = 'selecting_locations';
+        await userState.save();
+        await sendLocationOptions(from);
+    } catch (error) {
+        console.error('Error handling org lpq command:', error);
+        throw error;
+    }
+}
+
+// Helper function to handle location selection
+async function handleLocationSelection(text, userState, from) {
+    try {
+        if (text === '9') {
+            userState.selectedLocations = LPQ_LOCATIONS;
+        } else {
+            const selectedIndices = text.split(',').map(num => parseInt(num.trim()) - 1);
+            userState.selectedLocations = selectedIndices
+                .filter(i => i >= 0 && i < LPQ_LOCATIONS.length)
+                .map(i => LPQ_LOCATIONS[i]);
+        }
+
+        if (userState.selectedLocations.length > 0) {
+            userState.currentState = 'selecting_sources';
+            await userState.save();
+            await sendSourceOptions(from);
+        } else {
+            await sendWhatsAppMessage(from, '❌ Invalid selection. Please try again.');
+        }
+    } catch (error) {
+        console.error('Error handling location selection:', error);
+        throw error;
+    }
+}
+
+// Helper function to handle source selection
+async function handleSourceSelection(text, userState, from) {
+    try {
+        if (text === '9') {
+            userState.selectedSources = SOURCES;
+        } else {
+            const selectedIndices = text.split(',').map(num => parseInt(num.trim()) - 1);
+            userState.selectedSources = selectedIndices
+                .filter(i => i >= 0 && i < SOURCES.length)
+                .map(i => SOURCES[i]);
+        }
+
+        if (userState.selectedSources.length > 0) {
+            userState.currentState = 'awaiting_review_question';
+            await userState.save();
+            await sendWhatsAppMessage(from, '🎯 Great! Now you can ask me anything about the reviews. For example:\n• What is the average rating?\n• What are the common complaints?\n• What do people like the most?\n• Summarize the reviews');
+        } else {
+            await sendWhatsAppMessage(from, '❌ Invalid selection. Please try again.');
+        }
+    } catch (error) {
+        console.error('Error handling source selection:', error);
+        throw error;
+    }
+}
+
+// Helper function to handle review questions
+async function handleReviewQuestion(text, userState, from) {
+    try {
+        userState.currentState = 'processing_review';
+        await userState.save();
+
+        await sendWhatsAppMessage(from, '🔄 Processing your request...');
+        const result = await analyzeReviews(text, userState.selectedLocations, userState.selectedSources);
+        
+        await sendWhatsAppMessage(from, result);
+        userState.currentState = 'awaiting_review_question';
+        await userState.save();
+    } catch (error) {
+        console.error('Error handling review question:', error);
+        userState.currentState = 'awaiting_review_question';
+        await userState.save();
+        throw error;
+    }
+}
 
 // Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
+    console.log(`Server running on port ${PORT}`);
 });

@@ -10,19 +10,11 @@ const { LPQ_LOCATIONS, SOURCES } = require('./utils/constants');
 // Initialize Express app
 const app = express();
 app.use(bodyParser.json());
-console.log("Hollateddddddst :: MONGODB_URI", process.env.MONGODB_URI);
-// Connect to MongoDB
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/whatsapp-integration', {
-    useNewUrlParser: true,
-  useUnifiedTopology: true,
-  serverSelectionTimeoutMS: 20000,
-  connectTimeoutMS: 20000,
-  keepAlive: true
-}).then(() => {
-    console.log('Connected to MongoDBd');
-}).catch(err => {
-    console.error('MongoDB connection error:', err);
-    console.error('MongoDB URI:', process.env.MONGODB_URI || 'mongodb://localhost:27017/whatsapp-integration');
+
+// Connect to MongoDB with retry mechanism
+connectWithRetry().catch(err => {
+    console.error('Failed to connect to MongoDB:', err);
+    process.exit(1);
 });
 
 // Webhook endpoint

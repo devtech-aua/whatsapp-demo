@@ -53,7 +53,7 @@ app.post('/webhook', async (req, res) => {
                 // Update last message
                 await userState.updateLastMessage(text, 'incoming');
                 
-                if (text === 'obenan') {
+                if (text === 'obemenu') {
                     userState.currentState = 'awaiting_command';
                     await userState.save();
                     await sendWhatsAppMessage(from, '*Welcome to Organization Assistant* 🤖\n\nHow can I help you today?\n\n*Available Commands:*\n1. *org <orgname>* - View organization options\n2. *help* - Show all commands');
@@ -123,9 +123,28 @@ app.post('/webhook', async (req, res) => {
                     }
                 }
                 else if (userState.currentState === 'awaiting_review_question') {
-                    const question = text;
+                    const question = text.toLowerCase();
                     
+                    // Check if user wants to stop
+                    if (question === 'no' || question === 'clear' || question === 'stop') {
+                        userState.currentState = 'awaiting_command';
+                        await userState.save();
+                        await sendWhatsAppMessage(from, "👋 Thank you for using our review analysis service. Type *obemenu* anytime to start again!");
+                        return;
+                    }
+
+                    // Check if we can process this request (5-second cooldown)
+                    if (!userState.canProcess()) {
+                        console.log('Request ignored due to cooldown');
+                        return res.sendStatus(200);
+                    }
+
                     try {
+                        // Set state to processing and update processing time
+                        userState.currentState = 'processing_review';
+                        userState.updateProcessingTime();
+                        await userState.save();
+
                         // Call review analyzer with the user's question
                         await sendWhatsAppMessage(from, '🔄 Analyzing reviews, please wait...');
                         const analysis = await analyzeReviews(userState.selections.locations, userState.selections.sources, question);
@@ -137,6 +156,14 @@ app.post('/webhook', async (req, res) => {
                         if (analysis.hasGraph && analysis.chartUrl) {
                             await sendWhatsAppMessage(from, analysis.chartUrl, 'image');
                         }
+
+                        // Ask if they want to continue
+                        await sendWhatsAppMessage(from, `\n🤔 Would you like to ask another question about the reviews?\n\n• Ask your question directly\n• Type *no* to finish\n• Type *clear* to start over`);
+                        
+                        // Keep the state as awaiting_review_question to allow more questions
+                        userState.currentState = 'awaiting_review_question';
+                        await userState.save();
+
                     } catch (error) {
                         console.error('Error analyzing reviews:', error);
                         let errorMessage = '❌ Sorry, there was an error analyzing the reviews.';
@@ -148,9 +175,11 @@ app.post('/webhook', async (req, res) => {
                         }
                         
                         await sendWhatsAppMessage(from, errorMessage);
-                    } finally {
-                        // Always reset state after handling the question, whether success or error
-                        userState.currentState = 'awaiting_command';
+                        // Ask if they want to try again
+                        await sendWhatsAppMessage(from, `\n🔄 Would you like to try asking another question?\n\n• Ask your question directly\n• Type *no* to finish\n• Type *clear* to start over`);
+                        
+                        // Keep the state as awaiting_review_question
+                        userState.currentState = 'awaiting_review_question';
                         await userState.save();
                     }
                 }

@@ -12,46 +12,47 @@ const userStateSchema = new mongoose.Schema({
         enum: ['awaiting_command', 'selecting_locations', 'selecting_sources', 'awaiting_review_question'],
         default: 'awaiting_command'
     },
+    isActive: {
+        type: Boolean,
+        default: false
+    },
+    lastMessageTime: {
+        type: Date,
+        default: Date.now
+    },
+    lastProcessingTime: {
+        type: Date
+    },
     selections: {
         locations: [String],
         sources: [String]
     },
+    messages: [{
+        content: String,
+        direction: String,
+        timestamp: {
+            type: Date,
+            default: Date.now
+        }
+    }],
     lastInteraction: {
         type: Date,
         default: Date.now
     },
-    lastMessage: {
-        content: String,
-        timestamp: {
-            type: Date,
-            default: Date.now
-        },
-        direction: {
-            type: String,
-            enum: ['incoming', 'outgoing']
-        }
-    },
     sessionStarted: {
         type: Date,
         default: Date.now
-    },
-    isActive: {
-        type: Boolean,
-        default: true
     }
 }, {
     timestamps: true
 });
 
 // Add method to update last message
-userStateSchema.methods.updateLastMessage = function(content, direction) {
-    this.lastMessage = {
-        content,
-        timestamp: new Date(),
-        direction
-    };
+userStateSchema.methods.updateLastMessage = async function(content, direction) {
+    this.messages.push({ content, direction });
+    this.lastMessageTime = new Date();
     this.lastInteraction = new Date();
-    return this.save();
+    await this.save();
 };
 
 // Add method to clear selections
@@ -68,6 +69,19 @@ userStateSchema.methods.endSession = function() {
     this.isActive = false;
     this.currentState = 'awaiting_command';
     return this.save();
+};
+
+// Add method to check if can process
+userStateSchema.methods.canProcess = function() {
+    if (!this.lastProcessingTime) return true;
+    const now = new Date();
+    const timeDiff = now - this.lastProcessingTime;
+    return timeDiff > 5000; // 5 seconds cooldown
+};
+
+// Add method to update processing time
+userStateSchema.methods.updateProcessingTime = function() {
+    this.lastProcessingTime = new Date();
 };
 
 module.exports = mongoose.model('UserState', userStateSchema);

@@ -89,6 +89,16 @@ app.post('/webhook', async (req, res) => {
                 }
                 else if (userState.currentState === 'selecting_locations') {
                     const selections = text.split(',').map(num => num.trim());
+                    
+                    // Check if user wants to select all locations
+                    if (selections.includes('9')) {
+                        userState.selections.locations = [...LPQ_LOCATIONS];
+                        userState.currentState = 'selecting_sources';
+                        await userState.save();
+                        await sendSourceOptions(from);
+                        return;
+                    }
+                    
                     const validSelections = selections.every(num => !isNaN(num) && num > 0 && num <= LPQ_LOCATIONS.length);
                     
                     if (validSelections) {
@@ -98,12 +108,29 @@ app.post('/webhook', async (req, res) => {
                         await userState.save();
                         await sendSourceOptions(from);
                     } else {
-                        await sendWhatsAppMessage(from, '❌ Invalid selection. Please enter valid location numbers separated by commas (e.g., 1,3,4)');
+                        await sendWhatsAppMessage(from, '❌ Invalid selection. Please enter valid location numbers separated by commas (e.g., 1,3,4) or 9 for all locations');
                         await sendLocationOptions(from);
                     }
                 }
                 else if (userState.currentState === 'selecting_sources') {
                     const selections = text.split(',').map(num => num.trim());
+                    
+                    // Check if user wants to select all sources
+                    if (selections.includes('9')) {
+                        userState.selections.sources = [...SOURCES];
+                        
+                        // Print selections
+                        const userSelection = userState.selections;
+                        const summary = `*Selected Options:*\n\n*Locations:*\n${userSelection.locations.map((loc, i) => `${i + 1}. ${loc}`).join('\n')}\n\n*Sources:*\n${userSelection.sources.map((src, i) => `${i + 1}. ${src}`).join('\n')}`;
+                        await sendWhatsAppMessage(from, summary);
+
+                        userState.currentState = 'awaiting_review_question';
+                        userState.isActive = true;
+                        await userState.save();
+                        await sendWhatsAppMessage(from, '❓ What would you like to know about these reviews? (e.g., "When was the last review posted?" or "What is the average rating?")');
+                        return;
+                    }
+                    
                     const validSelections = selections.every(num => !isNaN(num) && num > 0 && num <= SOURCES.length);
                     
                     if (validSelections) {
@@ -116,11 +143,11 @@ app.post('/webhook', async (req, res) => {
                         await sendWhatsAppMessage(from, summary);
 
                         userState.currentState = 'awaiting_review_question';
-                        userState.isActive = true;  // Ensure user remains active
+                        userState.isActive = true;
                         await userState.save();
                         await sendWhatsAppMessage(from, '❓ What would you like to know about these reviews? (e.g., "When was the last review posted?" or "What is the average rating?")');
                     } else {
-                        await sendWhatsAppMessage(from, '❌ Invalid selection. Please enter valid source numbers separated by commas (e.g., 1,3,4)');
+                        await sendWhatsAppMessage(from, '❌ Invalid selection. Please enter valid source numbers separated by commas (e.g., 1,3,4) or 9 for all sources');
                         await sendSourceOptions(from);
                     }
                 }
@@ -276,14 +303,14 @@ app.post('/webhook', async (req, res) => {
 
 // Function to send location options
 async function sendLocationOptions(to) {
-    const message = `*Please select locations* (enter numbers separated by commas):\n\n${LPQ_LOCATIONS.map((loc, i) => `${i + 1}. ${loc}`).join('\n')}`;
-    await sendWhatsAppMessage(to, message);
+    const locationList = LPQ_LOCATIONS.map((loc, i) => `${i + 1}. ${loc}`).join('\n');
+    await sendWhatsAppMessage(to, `Please select locations (enter numbers separated by commas):\n\n${locationList}\n\n9. Select All Locations`);
 }
 
 // Function to send source options
 async function sendSourceOptions(to) {
-    const message = `*Please select sources* (enter numbers separated by commas):\n\n${SOURCES.map((src, i) => `${i + 1}. ${src}`).join('\n')}`;
-    await sendWhatsAppMessage(to, message);
+    const sourceList = SOURCES.map((src, i) => `${i + 1}. ${src}`).join('\n');
+    await sendWhatsAppMessage(to, `Please select review sources (enter numbers separated by commas):\n\n${sourceList}\n\n9. Select All Sources`);
 }
 
 // Function to send WhatsApp message

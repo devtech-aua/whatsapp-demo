@@ -4,11 +4,25 @@ const { LPQ_LOCATION_IDS, SOURCE_IDS, COMPANY_ID } = require('./constants');
 
 async function analyzeReviews(locations, sources, prompt = "when was the last review posted") {
     try {
+        // Input validation
+        if (!locations || !Array.isArray(locations) || locations.length === 0) {
+            throw new Error('No locations provided');
+        }
+        if (!sources || !Array.isArray(sources) || sources.length === 0) {
+            throw new Error('No sources provided');
+        }
+
         // Convert location names to IDs
         const locationIds = locations.map(loc => LPQ_LOCATION_IDS[loc]).filter(id => id);
+        if (locationIds.length === 0) {
+            throw new Error('No valid location IDs found');
+        }
         
         // Convert source names to IDs
         const sourceIds = sources.map(src => SOURCE_IDS[src]).filter(id => id);
+        if (sourceIds.length === 0) {
+            throw new Error('No valid source IDs found');
+        }
 
         // Prepare request payload
         const payload = {
@@ -20,14 +34,23 @@ async function analyzeReviews(locations, sources, prompt = "when was the last re
 
         console.log('Making API call with payload:', JSON.stringify(payload, null, 2));
 
-        // Make API call
-        const response = await axios.post('https://reviewanalyser.obenan.com/chat', payload);
+        // Make API call with timeout
+        const response = await axios.post('https://reviewanalyser.obenan.com/chat', payload, {
+            timeout: 30000, // 30 second timeout
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
         
         console.log('API Response:', JSON.stringify(response.data, null, 2));
 
-        // Check if we have a valid response
-        if (!response.data || !response.data.response) {
-            throw new Error('Invalid response format from API');
+        // Validate response structure
+        if (!response.data) {
+            throw new Error('Empty response from API');
+        }
+
+        if (!response.data.response) {
+            throw new Error('No response field in API data');
         }
 
         let result = {
@@ -77,21 +100,50 @@ async function analyzeReviews(locations, sources, prompt = "when was the last re
                 chart.setWidth(800);
                 chart.setHeight(400);
                 
-                // Get chart URL
-                result.chartUrl = await chart.getShortUrl();
-                result.hasGraph = true;
+                try {
+                    // Get chart URL with timeout
+                    result.chartUrl = await Promise.race([
+                        chart.getShortUrl(),
+                        new Promise((_, reject) => 
+                            setTimeout(() => reject(new Error('Chart generation timeout')), 15000)
+                        )
+                    ]);
+                    result.hasGraph = true;
+                } catch (chartError) {
+                    console.error('Error generating chart:', chartError);
+                    // Continue without chart if there's an error
+                }
             }
         }
         
         return result;
     } catch (error) {
-        console.error('Error in analyzeReviews:', error);
-        console.error('Error details:', {
+        console.error('Error in analyzeReviews:', {
             message: error.message,
+            stack: error.stack,
             response: error.response?.data,
-            request: error.config
+            status: error.response?.status,
+            request: {
+                url: error.config?.url,
+                data: error.config?.data,
+                headers: error.config?.headers
+            }
         });
-        throw error;
+
+        // Return more specific error messages
+        if (error.message.includes('timeout')) {
+            throw new Error('The review analysis service is taking too long to respond. Please try again.');
+        } else if (error.response?.status === 404) {
+            throw new Error('Could not connect to the review analyzer service. Please try again later.');
+        } else if (error.message.includes('No valid location')) {
+            throw new Error('Please select valid locations before analyzing reviews.');
+        } else if (error.message.includes('No valid source')) {
+            throw new Error('Please select valid review sources before analyzing reviews.');
+        } else if (error.response?.status === 400) {
+            throw new Error('Invalid request. Please check your selections and try again.');
+        } else {
+            throw new Error('Error analyzing reviews. Please try again or contact support if the issue persists.');
+        }
     }
 }
 

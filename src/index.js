@@ -145,6 +145,14 @@ app.post('/webhook', async (req, res) => {
                         userState.updateProcessingTime();
                         await userState.save();
 
+                        // Validate selections before making the API call
+                        if (!userState.selections.locations || userState.selections.locations.length === 0) {
+                            throw new Error('Please select locations first using "org lpq" command');
+                        }
+                        if (!userState.selections.sources || userState.selections.sources.length === 0) {
+                            throw new Error('Please select review sources after selecting locations');
+                        }
+
                         // Call review analyzer with the user's question
                         await sendWhatsAppMessage(from, '🔄 Analyzing reviews, please wait...');
                         const analysis = await analyzeReviews(userState.selections.locations, userState.selections.sources, question);
@@ -166,17 +174,21 @@ app.post('/webhook', async (req, res) => {
 
                     } catch (error) {
                         console.error('Error analyzing reviews:', error);
-                        let errorMessage = '❌ Sorry, there was an error analyzing the reviews.';
+                        let errorMessage = '❌ ' + (error.message || 'Sorry, there was an error analyzing the reviews.');
                         
-                        if (error.response?.status === 404) {
-                            errorMessage = '❌ Could not connect to the review analyzer service. Please try again later.';
-                        } else if (error.message === 'Invalid response format from API') {
-                            errorMessage = '❌ Received unexpected data format from the service.';
+                        if (error.message?.includes('select locations')) {
+                            errorMessage += '\n\nType *org lpq* to start selecting locations.';
+                        } else if (error.message?.includes('select review sources')) {
+                            await sendLocationOptions(from);
+                            return;
                         }
                         
                         await sendWhatsAppMessage(from, errorMessage);
-                        // Ask if they want to try again
-                        await sendWhatsAppMessage(from, `\n🔄 Would you like to try asking another question?\n\n• Ask your question directly\n• Type *no* to finish\n• Type *clear* to start over`);
+                        
+                        // Only show continue options if we're in the right state
+                        if (userState.currentState === 'awaiting_review_question' || userState.currentState === 'processing_review') {
+                            await sendWhatsAppMessage(from, `\n🔄 Would you like to try asking another question?\n\n• Ask your question directly\n• Type *no* to finish\n• Type *clear* to start over`);
+                        }
                         
                         // Keep the state as awaiting_review_question
                         userState.currentState = 'awaiting_review_question';

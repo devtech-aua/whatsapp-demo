@@ -22,7 +22,7 @@ const SOURCE_IDS = {
 };
 
 // Company ID for Le Pain Quotidien
-const COMPANY_ID = 'lpq_benelux';
+const COMPANY_ID = 175;
 
 // Generate arrays from the mappings
 const LPQ_LOCATIONS = [

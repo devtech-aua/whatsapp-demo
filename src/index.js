@@ -83,6 +83,7 @@ app.post('/webhook', async (req, res) => {
                         await userState.clearSelections();
                     }
                     userState.currentState = 'selecting_locations';
+                    userState.isActive = true;  // Set user as active
                     await userState.save();
                     await sendLocationOptions(from);
                 }
@@ -115,6 +116,7 @@ app.post('/webhook', async (req, res) => {
                         await sendWhatsAppMessage(from, summary);
 
                         userState.currentState = 'awaiting_review_question';
+                        userState.isActive = true;  // Ensure user remains active
                         await userState.save();
                         await sendWhatsAppMessage(from, '❓ What would you like to know about these reviews? (e.g., "When was the last review posted?" or "What is the average rating?")');
                     } else {
@@ -122,7 +124,7 @@ app.post('/webhook', async (req, res) => {
                         await sendSourceOptions(from);
                     }
                 }
-                else if (userState.currentState === 'awaiting_review_question') {
+                else if (userState.currentState === 'awaiting_review_question' || userState.currentState === 'processing_review') {
                     const question = text.toLowerCase();
                     
                     // Check if user wants to stop
@@ -185,13 +187,8 @@ app.post('/webhook', async (req, res) => {
                         
                         await sendWhatsAppMessage(from, errorMessage);
                         
-                        // Only show continue options if we're in the right state
-                        if (userState.currentState === 'awaiting_review_question' || userState.currentState === 'processing_review') {
-                            await sendWhatsAppMessage(from, `\n🔄 Would you like to try asking another question?\n\n• Ask your question directly\n• Type *no* to finish\n• Type *clear* to start over`);
-                        }
-                        
-                        // Keep the state as awaiting_review_question
-                        userState.currentState = 'awaiting_review_question';
+                        // Reset state to awaiting_command if there's a serious error
+                        userState.currentState = 'awaiting_command';
                         await userState.save();
                     }
                 }

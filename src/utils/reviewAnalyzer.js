@@ -33,16 +33,20 @@ async function analyzeReviews(locations, sources, prompt = "when was the last re
         };
 
         console.log('Making API call with payload:', JSON.stringify(payload, null, 2));
+        console.log('API URL:', 'https://reviewanalyser.obenan.com/chat');
 
-        // Make API call with timeout
+        // Make API call with timeout and headers
         const response = await axios.post('https://reviewanalyser.obenan.com/chat', payload, {
             timeout: 30000, // 30 second timeout
             headers: {
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
             }
         });
         
-        console.log('API Response:', JSON.stringify(response.data, null, 2));
+        console.log('API Response Status:', response.status);
+        console.log('API Response Headers:', JSON.stringify(response.headers, null, 2));
+        console.log('API Response Data:', JSON.stringify(response.data, null, 2));
 
         // Validate response structure
         if (!response.data) {
@@ -64,6 +68,8 @@ async function analyzeReviews(locations, sources, prompt = "when was the last re
             
             // Check if we have valid data for the chart
             if (Array.isArray(graphData.data) && graphData.data.length > 0) {
+                console.log('Processing graph data:', JSON.stringify(graphData.data, null, 2));
+                
                 const chart = new QuickChart();
                 
                 chart.setConfig({
@@ -109,6 +115,7 @@ async function analyzeReviews(locations, sources, prompt = "when was the last re
                         )
                     ]);
                     result.hasGraph = true;
+                    console.log('Generated chart URL:', result.chartUrl);
                 } catch (chartError) {
                     console.error('Error generating chart:', chartError);
                     // Continue without chart if there's an error
